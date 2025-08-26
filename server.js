@@ -1,68 +1,74 @@
 const fs = require('fs');
-const path = require('path');
-const express = require('express');
+const http = require('http');
 const WebSocket = require('ws');
 const Rcon = require('rcon');
+const express = require('express');
 
-const app = express();
-const PORT = 3001;
-
-// Pfad zum Log
 const LOG_FILE = '/home/pzserver/Zomboid/server-console.txt';
-
-// RCON Config
 const RCON_HOST = '127.0.0.1';
 const RCON_PORT = 27015;
-const RCON_PASSWORD = 'x3pc092201';
+const RCON_PASSWORD = 'dein_rcon_passwort';
 
-// WebSocket-Server für Live-Log
-const server = require('http').createServer(app);
+const app = express();
+const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// RCON-Client
 let rcon = new Rcon(RCON_HOST, RCON_PORT, RCON_PASSWORD);
 
 rcon.on('auth', () => console.log('RCON: Auth erfolgreich'));
-rcon.on('response', (str) => console.log('RCON response:', str));
+rcon.on('response', (str) => {
+    wss.clients.forEach(client => {
+        if(client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify({ rconResponse: str }));
+        }
+    });
+});
 rcon.on('error', (err) => console.error('RCON error:', err));
 rcon.connect();
 
-// WebSocket-Verbindung
 wss.on('connection', ws => {
     console.log('Frontend verbunden');
 
-    // Neue RCON-Kommandos vom Frontend
-    ws.on('message', msg => {
-        const { command } = JSON.parse(msg);
-        if(command && rcon) {
-            rcon.send(command);
+    fs.readFile(LOG_FILE, 'utf8', (err, data) => {
+        if(!err) {
+            const lines = data.split('\n').slice(-50).join('\n');
+            ws.send(JSON.stringify({ log: lines }));
         }
     });
 
-    // Beim Verbinden aktuelle Log-Datei senden
-    fs.readFile(LOG_FILE, 'utf8', (err, data) => {
-        if(!err) ws.send(JSON.stringify({ log: data }));
+    ws.on('message', msg => {
+        try {
+            const { command } = JSON.parse(msg);
+            if(command && rcon) rcon.send(command);
+        } catch(e) {
+            console.error('WS parsing error:', e);
+        }
     });
 });
 
-// File Tail für Live-Updates
-fs.watchFile(LOG_FILE, { interval: 1000 }, (curr, prev) => {
-    fs.readFile(LOG_FILE, 'utf8', (err, data) => {
+// Tail-Funktion für Logfile
+let lastSize = 0;
+fs.stat(LOG_FILE, (err, stats) => { if(!err) lastSize = stats.size; });
+
+setInterval(() => {
+    fs.stat(LOG_FILE, (err, stats) => {
         if(err) return;
-        // sende nur neue Zeilen
-        wss.clients.forEach(client => {
-            if(client.readyState === WebSocket.OPEN) {
-                client.send(JSON.stringify({ log: data }));
-            }
-        });
+        if(stats.size > lastSize) {
+            const stream = fs.createReadStream(LOG_FILE, { start: lastSize, end: stats.size });
+            let chunk = '';
+            stream.on('data', data => chunk += data.toString());
+            stream.on('end', () => {
+                wss.clients.forEach(client => {
+                    if(client.readyState === WebSocket.OPEN) {
+                        client.send(JSON.stringify({ log: chunk }));
+                    }
+                });
+            });
+            lastSize = stats.size;
+        }
     });
-});
+}, 1000);
 
-// Express-Endpunkt optional
-app.get('/status', (req, res) => {
-    res.json({ status: 'ok' });
-});
+app.get('/status', (req, res) => res.json({ status: 'ok' }));
 
-server.listen(PORT, () => {
-    console.log(`Backend läuft auf http://localhost:${PORT}`);
-});
+server.listen(3001, () => console.log('Backend läuft auf http://localhost:3001'));
